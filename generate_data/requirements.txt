@@ -1,0 +1,8 @@
+psycopg2-binary
+faker
+pymongo
+neo4j
+redis
+elasticsearch==8.18.0
+tqdm
+python-dotenv
