@@ -167,10 +167,15 @@ services:
       - DB_NAME=university_db
       - DB_USER=user
       - DB_PASSWORD=password
-      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NEO4J_URI=bolt://neo4j:7687
     depends_on:
       - postgres
       - elasticsearch
+      - neo4j
+      - redis
 
   lab2-service:
     build:

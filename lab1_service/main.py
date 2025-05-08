@@ -5,6 +5,7 @@ from typing import List, Optional
 import psycopg2
 from psycopg2 import sql
 import logging
+from datetime import date
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class User(BaseModel):
     username: str
 
 class StudentReport(BaseModel):
-    student_id: str  # Изменил на str, так как student_number это строка
+    student_id: int
     full_name: str
     student_record: str
     group_name: str
@@ -59,35 +60,35 @@ async def get_low_attendance_report(
     cursor = conn.cursor()
 
     try:
-        # Исправленный SQL-запрос с учетом вашей структуры данных
+        # Исправленный SQL-запрос с учетом структуры данных из генератора
         query = """
             WITH lecture_matches AS (
                 SELECT l.id
-                FROM lecture l
-                WHERE l.name ILIKE %s
+                FROM lectures l
+                WHERE l.topic ILIKE %s
             ),
             student_attendance AS (
                 SELECT 
-                    s.student_number AS student_id,
-                    s.fullname AS full_name,
-                    s.student_number AS student_record,
+                    s.id AS student_id,
+                    s.full_name AS full_name,
+                    s.student_record AS student_record,
                     g.name AS group_name,
-                    g.formation_year AS course,
-                    d.name AS kafedra_name,
-                    COUNT(a.id) FILTER (WHERE a.status = TRUE) AS present_count,
+                    g.course AS course,
+                    k.name AS kafedra_name,
+                    COUNT(a.id) FILTER (WHERE a.status = 'present') AS present_count,
                     COUNT(a.id) AS total_count
                 FROM 
-                    student s
-                    JOIN groups g ON s.id_group = g.id
-                    JOIN department d ON g.id_department = d.id
-                    JOIN attendance a ON s.student_number = a.id_student
-                    JOIN schedule sch ON a.id_schedule = sch.id
-                    JOIN lecture l ON sch.id_lecture = l.id
+                    students s
+                    JOIN groups g ON s.group_id = g.id
+                    JOIN kafedra k ON g.kafedra_id = k.id
+                    JOIN attendance a ON s.id = a.student_id
+                    JOIN schedule sch ON a.schedule_id = sch.id
+                    JOIN lectures l ON sch.lecture_id = l.id
                 WHERE 
                     l.id IN (SELECT id FROM lecture_matches)
                     AND a.week_start BETWEEN %s AND %s
                 GROUP BY 
-                    s.student_number, s.fullname, g.name, g.formation_year, d.name
+                    s.id, s.full_name, s.student_record, g.name, g.course, k.name
                 HAVING 
                     COUNT(a.id) > 0
             )
@@ -102,16 +103,18 @@ async def get_low_attendance_report(
                 %s AS report_period,
                 %s AS search_term,
                 ARRAY(
-                    SELECT DISTINCT l.name 
-                    FROM lecture l
-                    JOIN schedule sch ON l.id = sch.id_lecture
-                    JOIN attendance att ON sch.id = att.id_schedule
-                    WHERE att.id_student = sa.student_id
-                    AND l.name ILIKE %s
+                    SELECT DISTINCT l.topic 
+                    FROM lectures l
+                    JOIN schedule sch ON l.id = sch.lecture_id
+                    JOIN attendance att ON sch.id = att.schedule_id
+                    WHERE att.student_id = sa.student_id
+                    AND l.topic ILIKE %s
                     AND att.week_start BETWEEN %s AND %s
                 ) AS matching_lectures
             FROM 
                 student_attendance sa
+            WHERE 
+                (present_count::float / NULLIF(total_count, 0)) * 100 < 70
             ORDER BY 
                 attendance_percent ASC
             LIMIT 10
