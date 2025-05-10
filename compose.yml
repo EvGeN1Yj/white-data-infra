@@ -194,5 +194,7 @@ services:
       - DB_PASSWORD=password
       - MONGO_HOST=mongo
     depends_on:
-      - postgres
-      - mongo
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
