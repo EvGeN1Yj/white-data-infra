@@ -172,10 +172,14 @@ services:
       - REDIS_PORT=6379
       - NEO4J_URI=bolt://neo4j:7687
     depends_on:
-      - postgres
-      - elasticsearch
-      - neo4j
-      - redis
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   lab2-service:
     build:

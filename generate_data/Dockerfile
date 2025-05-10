@@ -8,6 +8,8 @@ WORKDIR /app
 COPY requirements.txt .
 COPY data_generator.py .
 COPY init_db.sql .
+COPY main.py .
+COPY create.sql .
 
 # Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
@@ -16,4 +18,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /app/logs
 
 # Запускаем генератор при старте контейнера
-CMD sleep 40 && python data_generator.py
+CMD sleep 40 && python main.py

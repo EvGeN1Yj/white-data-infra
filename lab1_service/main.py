@@ -3,9 +3,12 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import List, Optional
 import psycopg2
-from psycopg2 import sql
 import logging
 from datetime import date
+from elasticsearch import Elasticsearch
+from neo4j import GraphDatabase
+import redis
+import json
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -20,17 +23,6 @@ app = FastAPI()
 class User(BaseModel):
     username: str
 
-class StudentReport(BaseModel):
-    student_id: int
-    full_name: str
-    student_record: str
-    group_name: str
-    course: int
-    kafedra_name: str
-    attendance_percent: float
-    report_period: str
-    search_term: str
-    matching_lectures: List[str]
 
 # Настройки аутентификации
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -40,117 +32,115 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     # Для примера просто возвращаем тестового пользователя
     return User(username="testuser")
 
-# Подключение к БД
-def get_db_connection():
-    return psycopg2.connect(
-        dbname="university_db",
-        user="user",
-        password="password",
-        host="postgres"
-    )
 
-@app.get("/reports/low_attendance/", response_model=List[StudentReport])
+# Подключение к Elasticsearch
+es = Elasticsearch('http://elasticsearch:9200')
+
+#Postgres
+pg_conn = psycopg2.connect(host="postgres", port="5432", database="university_db", user="user", password="password")
+
+# Redis
+redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+
+# NEO4j
+neo4j_driver = GraphDatabase.driver("bolt://neo4j:7687", auth=("neo4j", "password"))
+
+@app.get("/reports/low_attendance/", response_model=List)
 async def get_low_attendance_report(
     search_term: str,
     start_date: str,
     end_date: str,
     current_user: User = Depends(get_current_user)
 ):
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
     try:
-        # Исправленный SQL-запрос с учетом структуры данных из генератора
+        query = {
+            "query": {
+                "match": {
+                    "description": search_term
+                }
+            }
+        }
+        # Выполнение запроса
+        response = es.search(index="lecture_materials",body=query)
+        # Сбор id из результатов
+        ids = [int(hit["_id"]) for hit in response["hits"]["hits"]]
+        #######################################################################
         query = """
-            WITH lecture_matches AS (
-                SELECT l.id
-                FROM lectures l
-                WHERE l.topic ILIKE %s
-            ),
-            student_attendance AS (
-                SELECT 
-                    s.id AS student_id,
-                    s.full_name AS full_name,
-                    s.student_record AS student_record,
-                    g.name AS group_name,
-                    g.course AS course,
-                    k.name AS kafedra_name,
-                    COUNT(a.id) FILTER (WHERE a.status = 'present') AS present_count,
-                    COUNT(a.id) AS total_count
-                FROM 
-                    students s
-                    JOIN groups g ON s.group_id = g.id
-                    JOIN kafedra k ON g.kafedra_id = k.id
-                    JOIN attendance a ON s.id = a.student_id
-                    JOIN schedule sch ON a.schedule_id = sch.id
-                    JOIN lectures l ON sch.lecture_id = l.id
-                WHERE 
-                    l.id IN (SELECT id FROM lecture_matches)
-                    AND a.week_start BETWEEN %s AND %s
-                GROUP BY 
-                    s.id, s.full_name, s.student_record, g.name, g.course, k.name
-                HAVING 
-                    COUNT(a.id) > 0
-            )
+            MATCH (gr:Group)-[h:HAS_SCHEDULE]->(lec:Lecture)
+            WHERE date(h.attendance_date) >= date($start_date) 
+              AND date(h.attendance_date) <= date($end_date)
+            RETURN lec.id
+            ORDER BY h.attendance_date
+            """
+
+        with neo4j_driver.session() as session:
+            result = session.run(query, start_date=start_date, end_date=end_date)
+            neo_ids=[int(x[0]) for x in result]
+        #########################################################################
+        common_elements = [value for value in ids if value in neo_ids]
+        if len(common_elements)<1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+            return 'no lections'
+        # SQL-запрос для получения данных
+        query = f"""
             SELECT 
-                student_id,
-                full_name,
-                student_record,
-                group_name,
-                course,
-                kafedra_name,
-                (present_count::float / NULLIF(total_count, 0)) * 100 AS attendance_percent,
-                %s AS report_period,
-                %s AS search_term,
-                ARRAY(
-                    SELECT DISTINCT l.topic 
-                    FROM lectures l
-                    JOIN schedule sch ON l.id = sch.lecture_id
-                    JOIN attendance att ON sch.id = att.schedule_id
-                    WHERE att.student_id = sa.student_id
-                    AND l.topic ILIKE %s
-                    AND att.week_start BETWEEN %s AND %s
-                ) AS matching_lectures
+                l.topic,
+                s.id AS student_id,
+                COUNT(CASE WHEN a.status = 'presence' THEN 1 END) * 100.0 / COUNT(a.id) AS percents
             FROM 
-                student_attendance sa
+                lectures l
+            JOIN 
+                schedule sch ON l.id = sch.lecture_id
+            JOIN 
+                attendance a ON sch.id = a.schedule_id
+            JOIN 
+                students s ON a.student_id = s.id
             WHERE 
-                (present_count::float / NULLIF(total_count, 0)) * 100 < 70
+                l.id IN ({ ''.join(map(str, common_elements))})
+            GROUP BY 
+                l.topic, s.id
             ORDER BY 
-                attendance_percent ASC
-            LIMIT 10
-        """
+                percents ASC
+            LIMIT 10;
+            """
 
-        search_pattern = f"%{search_term}%"
-        cursor.execute(query, (
-            search_pattern,
-            start_date,
-            end_date,
-            f"{start_date} - {end_date}",
-            search_term,
-            search_pattern,
-            start_date,
-            end_date
-        ))
+        # Создание курсора и выполнение запроса
+        cursor = pg_conn.cursor()
+        cursor.execute(query)
 
-        results = []
-        for row in cursor.fetchall():
-            results.append(StudentReport(
-                student_id=row[0],
-                full_name=row[1],
-                student_record=row[2],
-                group_name=row[3],
-                course=row[4],
-                kafedra_name=row[5],
-                attendance_percent=row[6],
-                report_period=row[7],
-                search_term=row[8],
-                matching_lectures=row[9] if row[9] else []
-            ))
+        # Получение всех строк результата
+        rows = cursor.fetchall()
 
-        return results
+        # Формирование ответа в формате JSON
+        response = []
+        for row in rows:
+            topic = row[0]
+            student_id = row[1]
+            percents = row[2]
+
+            # Получение информации о студенте из Redis
+            student_info = redis_client.get(
+                f'student:{student_id}')  # Предполагается, что данные хранятся по ключу 'student:{id}'
+
+            # Если информация о студенте найдена, добавляем её в ответ
+            if student_info:
+                student_info = json.loads(student_info)  # Преобразуем строку JSON в словарь
+                response.append({
+                    'topic': topic,
+                    'student_id': student_id,
+                    'percents': percents,
+                    'student_info': student_info,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'termin':search_term
+                })
+
+        return response
+
+
     except Exception as e:
-        logger.error(f"Database error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Database error")
+        logger.error(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Service error")
     finally:
         cursor.close()
-        conn.close()
