@@ -148,6 +148,8 @@ services:
       - "8000:8000"
     depends_on:
       - lab1-service
+      - lab2-service
+      - lab3-service
     networks:
       - university-network
     environment:
@@ -198,3 +200,32 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+
+  lab3-service:
+    build:
+      context: ./lab3_service
+      dockerfile: Dockerfile
+    networks:
+      - university-network
+    environment:
+      - DB_HOST=postgres
+      - DB_NAME=university_db
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - MONGO_HOST=mongo
+#      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+#      - REDIS_HOST=redis
+#      - REDIS_PORT=6379
+#      - NEO4J_URI=bolt://neo4j:7687
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+

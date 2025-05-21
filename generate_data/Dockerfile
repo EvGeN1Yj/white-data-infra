@@ -6,8 +6,6 @@ WORKDIR /app
 
 # Копируем зависимости и скрипт
 COPY requirements.txt .
-COPY data_generator.py .
-COPY init_db.sql .
 COPY main.py .
 COPY create.sql .
 
