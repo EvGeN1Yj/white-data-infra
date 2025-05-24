@@ -13,9 +13,14 @@ import os
 from datetime import datetime, date, timedelta
 fake = Faker('ru_RU')  # Для русскоязычных данных
 
+
 def new_university():
+    russian_uppercase = 'АБВГДЕЖЗИКЛМНОПРСТУФХЭЮЯ'
+    name_length = random.randint(3, 5)
+    name = ''.join(random.choice(russian_uppercase) for _ in range(name_length))
+
     return {
-        "name": ''.join(fake.random_uppercase_letter() for _ in range(random.randint(3, 5))),
+        "name": name,
         "address": f"{fake.city()}, {fake.street_address()}"
     }
 

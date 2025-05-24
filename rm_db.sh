@@ -7,6 +7,7 @@ echo "Удаление Docker-образов..."
 docker rmi bekk-api-gateway
 docker rmi bekk-lab1-service
 docker rmi bekk-lab2-service
+docker rmi bekk-lab3-service
 docker rmi bekk-data-generator
 
 # Путь к целевой директории

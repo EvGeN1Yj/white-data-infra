@@ -1,10 +1,11 @@
 import datetime
 import logging
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Dict, Any
 import psycopg2
 from neo4j import GraphDatabase
+from pymongo import MongoClient
+import os
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -13,112 +14,127 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-
 # ----- Configuration -----
-PG_HOST = "postgres"
-PG_PORT = 5432
-PG_DB = "university_db"
-PG_USER = "user"
-PG_PASS = "password"
-
-NEO4J_URI = "bolt://neo4j:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"
 
 # Init FastAPI
 app = FastAPI()
 
-# Init Postgres sync connection
-pg_conn = psycopg2.connect(
-    host=PG_HOST,
-    port=PG_PORT,
-    database=PG_DB,
-    user=PG_USER,
-    password=PG_PASS
-)
+# Подключение к PostgreSQL
+pg_conn = psycopg2.connect(host="postgres", port="5432", database="university_db", user="user", password="password")
 pg_conn.autocommit = True
 
-# Init Neo4j sync driver
-neo4j_driver = GraphDatabase.driver(
-    NEO4J_URI,
-    auth=(NEO4J_USER, NEO4J_PASSWORD)
-)
+# Подключение к Neo4j
 
-# ----- Pydantic models -----
-class LectureReport(BaseModel):
-    course_id: int
-    course_name: str
-    lecture_id: int
-    lecture_topic: str
-    tech_requirements: Optional[str]
-    attendees_count: int
+neo4j_driver = GraphDatabase.driver("bolt://neo4j:7687", auth=("neo4j", "password"))
 
-class RoomReportResponse(BaseModel):
-    year: int
-    semester: int
-    data: List[LectureReport]
+# Подключение к MongoDB
+mongo_client = MongoClient(f"mongodb://mongo:27017/")
+mongo_db = mongo_client['university']
 
 
-class LectureInfo(BaseModel):
-    course_name: str
-    topic: str
-    tech_requirements: str
-    total_listeners: int
-
-
-@app.get("/auditorium-requirements", response_model=[])
-def get_auditorium_requirements(year: int = Query(...), semester: int = Query(...)):
-    result = []
-
+@app.get("/auditorium-requirements", response_model=List[Dict[str, Any]])
+async def get_auditorium_requirements(
+        year: int = Query(..., description="Год обучения"),
+        semester: int = Query(..., description="Семестр (1 или 2)")
+) -> List[Dict[str, Any]]:
     try:
-        cur = pg_conn.cursor()
+        # Определяем период семестра
+        if semester == 1:
+            start_date = datetime.date(year, 9, 1)  # Осенний семестр
+            end_date = datetime.date(year, 12, 31)
+        else:
+            start_date = datetime.date(year, 2, 1)  # Весенний семестр
+            end_date = datetime.date(year, 6, 30)
 
-        # 1. Получаем данные по лекциям и группам, участвующим в семестре и году (предположим, семестр влияет на название курса)
-        start, end = datetime.date(year,6,1), datetime.date(year,12,30)
-        if semester == 2:
-            start, end = datetime.date(year,1,1), datetime.date(year,6,30)
+        # 1. Получаем базовую информацию о курсах и лекциях из PostgreSQL
+        with pg_conn.cursor() as cur:
+            cur.execute("""
+                        SELECT DISTINCT lc.id  AS course_id,
+                                        lc.name  AS course_name,
+                                        l.id AS lecture_id,
+                                        l.topic,
+                                        l.tech_requirements,
+                                        l.is_special,
+                                        MIN(a.attendance_date)::date as lecture_date,
+                                        d.id  AS department_id,
+                                        d.name AS department_name,
+                                        s.auditorium,
+                                        s.capacity
+                        FROM lecture_course lc
+                                 JOIN lectures l ON l.course_id = lc.id
+                                 JOIN departments d ON lc.department_id = d.id
+                                 JOIN schedule s ON s.lecture_id = l.id
+                                 JOIN attendance a ON a.schedule_id = s.id
+                        WHERE a.attendance_date::date BETWEEN %s AND %s
+                          AND l.tech_requirements IS NOT NULL
+                        GROUP BY lc.id, lc.name, l.id, l.topic,
+                                 l.tech_requirements, l.is_special, d.id, d.name,
+                                 s.auditorium, s.capacity
+                        ORDER BY MIN(a.attendance_date)::date
+                        """, (start_date, end_date))
 
-        cur.execute("""
-            SELECT 
-                lc.name AS course_name,
-                l.id AS lecture_id,
-                l.topic,
-                l.tech_requirements,
-                COUNT(DISTINCT s.id) AS total_listeners
-            FROM lecture_course lc
-            JOIN lectures l ON l.course_id = lc.id
-            JOIN schedule sch ON sch.lecture_id = l.id
-            JOIN attendance AS A ON A.schedule_id = A.id
-            JOIN groups g ON sch.group_id = g.id
-            JOIN students s ON s.group_id = g.id
-            WHERE A.attendance_date BETWEEN %s and %s 
-            GROUP BY lc.name, l.id, l.topic, l.tech_requirements
-        """, (start, end))
+            lectures_data = cur.fetchall()
 
-        lectures = cur.fetchall()
-        logging.info("Auditorium requirements fetched ", len(lectures))
+        result = []
+        for (course_id, course_name, lecture_id, topic, tech_requirements,
+             is_special, lecture_date, department_id, department_name,
+             auditorium, capacity) in lectures_data:
 
-        for course_name, lecture_id, topic, tech_requirements, total_listeners in lectures:
-            # 2. Используем Neo4j для уточнения, если это специальная лекция или требуется особое оборудование
+            # 2. Получаем количество студентов из Neo4j
             with neo4j_driver.session() as session:
-                special_flag = session.run(
-                    """
-                    MATCH (lec:Lecture {id: $lecture_id})
-                    RETURN lec.is_special AS is_special
-                    """,
-                    lecture_id=lecture_id
-                ).single()
+                student_count = session.run("""
+                    MATCH (l:Lecture {id: $lecture_id})<-[:HAS_SCHEDULE]-(g:Group)
+                    MATCH (s:Student)-[:BELONGS_TO]->(g)
+                    RETURN count(DISTINCT s) as student_count
+                """, lecture_id=lecture_id).single()["student_count"]
 
-                is_special = special_flag["is_special"] if special_flag else False
-            result.append({
-                "course_name":course_name,
-                "topic":topic + (" (Спец.)" if is_special else ""),
-                "tech_requirements":tech_requirements or "Не указаны",
-                "total_listeners":total_listeners
-            })
+            # 3. Получаем информацию об университете из MongoDB
+            org_info = mongo_db.university.find_one(
+                {"institutes.departments.id": department_id},
+                {"name": 1, "institutes.name": 1, "institutes.departments": 1}
+            )
 
-        cur.close()
+            institute_name = ""
+            university_name = ""
+            if org_info:
+                university_name = org_info.get("name", "")
+                for inst in org_info.get("institutes", []):
+                    for dept in inst.get("departments", []):
+                        if dept.get("id") == department_id:
+                            institute_name = inst.get("name", "")
+                            break
+                    if institute_name:
+                        break
+
+            # Рассчитываем требуемую вместимость с запасом 10%
+            required_capacity = int(student_count * 1.1)
+
+            report = {
+                "course_info": {
+                    "course_id": course_id,
+                    "course_name": course_name,
+                    "department": department_name,
+                    "institute": institute_name,
+                    "university": university_name
+                },
+                "lecture_info": {
+                    "lecture_id": lecture_id,
+                    "topic": topic,
+                    "tech_requirements": tech_requirements or "Не указаны",
+                    "date": lecture_date.isoformat(),
+                    "is_special": is_special,
+                    "auditorium": {
+                        "number": auditorium,
+                        "capacity": capacity
+                    }
+                },
+                "student_count": student_count,
+                "required_capacity": required_capacity
+            }
+            result.append(report)
+
         return result
 
     except Exception as e:
-        return [{"error": str(e)}]
+        logger.error(f"Error in get_auditorium_requirements: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

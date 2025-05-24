@@ -21,7 +21,7 @@ mongo_conn = MongoClient("mongodb://mongo:27017/")
 
 app = FastAPI()
 
-# --- Helper functions ---
+#Получаем id группы и кафедры
 def get_group_info(name: str) -> Dict[str, Any]:
     pg_cur.execute(
         """
@@ -33,8 +33,9 @@ def get_group_info(name: str) -> Dict[str, Any]:
     )
     return pg_cur.fetchone() or {}
 
-
+#Получаем список специальных курсов для указанной группы
 def get_courses(group_name: str) -> List[Dict[str, Any]]:
+
     pg_cur.execute(
         """
         SELECT lc.id AS course_id,
@@ -51,7 +52,7 @@ def get_courses(group_name: str) -> List[Dict[str, Any]]:
     )
     return pg_cur.fetchall()
 
-
+#Получаем расписание из Neo4j для группы и списка лекций, инфу о студенте
 def get_schedules(group_name: str, lec_ids: List[int]) -> List[tuple]:
     query = (
         """
@@ -66,7 +67,7 @@ def get_schedules(group_name: str, lec_ids: List[int]) -> List[tuple]:
         res = session.run(query, grp=group_name, lec_ids=lec_ids)
         return [(r['student_id'], r['lecture_id'], r['sched_id']) for r in res]
 
-
+#Подсчёт посещаемости
 def count_presence(student_id: int, sched_id: int) -> int:
     pg_cur.execute(
         """
@@ -79,7 +80,7 @@ def count_presence(student_id: int, sched_id: int) -> int:
     )
     return pg_cur.fetchone().get('attended', 0)
 
-
+#Получаем инфу о студентах
 def get_students(sids: List[int]) -> Dict[int, Any]:
     students = {}
     for sid in sids:
@@ -88,7 +89,7 @@ def get_students(sids: List[int]) -> Dict[int, Any]:
             students[sid] = json.loads(data)
     return students
 
-
+#Получаем организационную структуру университетов
 def get_org_structure(dept_id: int) -> Dict[str, Any]:
     rec = mongo_conn['university'].university.find_one(
         {"institutes.departments.id": dept_id},

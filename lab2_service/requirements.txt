@@ -5,3 +5,4 @@ passlib[bcrypt]
 httpx
 psycopg2-binary
 neo4j
+pymongo

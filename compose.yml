@@ -200,6 +200,8 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
 
   lab3-service:
     build:

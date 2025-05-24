@@ -8,3 +8,4 @@ neo4j
 redis
 elasticsearch==8.18.0
 pymongo
+python-multipart>=0.0.5
